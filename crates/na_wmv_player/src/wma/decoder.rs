@@ -5,7 +5,7 @@ use crate::error::{DecoderError, Result};
 
 use super::bitstream::GetBitContext;
 use super::common::ff_wma_get_frame_len_bits;
-use super::mdct::MdctNaive;
+use super::mdct::Mdct;
 use super::tables;
 use super::vlc::{ff_vlc_init_from_lengths, ff_vlc_init_sparse, get_vlc2, Vlc, VlcElem};
 
@@ -117,7 +117,7 @@ pub struct WmaDecoder {
     coefs: [Vec<f32>; MAX_CHANNELS],
 
     // MDCT.
-    mdct: Vec<MdctNaive>,
+    mdct: Vec<Mdct>,
     windows: Vec<Vec<f32>>, // per block-size: half window of length block_len
     output: Vec<f32>,       // 2*BLOCK_MAX_SIZE
     frame_out: [Vec<f32>; MAX_CHANNELS],
@@ -610,12 +610,12 @@ impl WmaDecoder {
     }
 
     fn wma_decode_init(&mut self, flags2: i32) -> Result<()> {
-        // Initialize MDCT contexts (naive) like wma_decode_init.
+        // Initialize MDCT contexts like wma_decode_init.
         let scale = 1.0f64 / 32768.0f64;
         self.mdct.clear();
         for i in 0..self.nb_block_sizes {
             let len = 1usize << (self.frame_len_bits - i as i32);
-            self.mdct.push(MdctNaive::new(len, scale));
+            self.mdct.push(Mdct::new(len, scale));
         }
 
         // Noise/hgain VLC.
@@ -1457,9 +1457,12 @@ impl WmaDecoder {
         for ch in 0..self.channels {
             let n4 = self.block_len / 2;
             if self.channel_coded[ch] {
+                // Disjoint field borrows: the MDCT context keeps its FFT scratch
+                // (hence `&mut`), while `output` and `coefs` are separate fields.
+                let block_len = self.block_len;
                 self.mdct[bsize].imdct_full(
-                    &mut self.output[..self.block_len * 2],
-                    &self.coefs[ch][..self.block_len],
+                    &mut self.output[..block_len * 2],
+                    &self.coefs[ch][..block_len],
                 );
             } else if !(self.ms_stereo && ch == 1) {
                 for v in &mut self.output[..self.block_len * 2] {
