@@ -146,6 +146,18 @@ fn ilog2_u32(x: u32) -> i32 {
     31 - (x.leading_zeros() as i32)
 }
 
+/// Is `last_exp` a usable index into the exponent table?
+///
+/// Upstream guards this with `if ((unsigned)last_exp >= 96)` — an *unsigned*
+/// compare, so negative values are rejected too. A signed-only upper-bound check
+/// lets `last_exp` in `[-60, -1]` through, and `ptab[last_exp as usize]` then
+/// indexes with a value near `usize::MAX`: a panic, not an error. For WMV that
+/// panic takes down the caller thread (the game's logic thread), which is a
+/// permanent white screen rather than "no audio".
+fn exponent_index_ok(last_exp: i32, len: usize) -> bool {
+    last_exp >= 0 && (last_exp as usize) < len
+}
+
 fn ff_exp10f(x: f32) -> f32 {
     // ff_exp10f(x) = exp2f(M_LOG2_10 * x)
     (std::f32::consts::LOG2_10 * x).exp2()
@@ -1124,7 +1136,7 @@ impl WmaDecoder {
         while q < q_end {
             let code = get_vlc2(gb, &self.exp_vlc.table, EXPVLCBITS, EXPMAX)?;
             last_exp += code - 60;
-            if (last_exp as i32 + 60) as usize >= tables::POW_TAB.len() {
+            if !exponent_index_ok(last_exp, ptab.len()) {
                 return Err(DecoderError::InvalidData(format!(
                     "Exponent out of range: {last_exp}"
                 )));
@@ -1521,5 +1533,39 @@ impl WmaDecoder {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exponent_index_ok;
+
+    /// Upstream rejects the exponent with an *unsigned* compare, so the whole
+    /// negative range must be rejected — including `[-60, -1]`, which the old
+    /// signed upper-bound check let through and then panicked on.
+    #[test]
+    fn exponent_index_rejects_negatives() {
+        let len = 96; // `POW_TAB[60..]`
+
+        assert!(!exponent_index_ok(-1, len));
+        assert!(!exponent_index_ok(-60, len), "this one used to index ptab[-60]");
+        assert!(!exponent_index_ok(i32::MIN, len));
+    }
+
+    #[test]
+    fn exponent_index_accepts_the_valid_range() {
+        let len = 96;
+
+        assert!(exponent_index_ok(0, len));
+        assert!(exponent_index_ok(36, len), "the v2 starting exponent");
+        assert!(exponent_index_ok(95, len));
+    }
+
+    #[test]
+    fn exponent_index_rejects_the_upper_bound() {
+        let len = 96;
+
+        assert!(!exponent_index_ok(96, len));
+        assert!(!exponent_index_ok(1000, len));
     }
 }
