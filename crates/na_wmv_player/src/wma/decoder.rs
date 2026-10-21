@@ -553,6 +553,13 @@ impl WmaDecoder {
                 }
 
                 // Decode the previous frame.
+                //
+                // Note there is deliberately no `reset_block_lengths` here. Upstream
+                // sets it only before the *new* frames below; the carried-over frame
+                // continues from the block lengths the previous packet ended on, so it
+                // must not re-read `prev_block_len_bits` / `block_len_bits`. Resetting
+                // here shifts the block header by `2 * n` bits and every frame in the
+                // packet then decodes from the wrong bit position.
                 let total_bits = self.last_superframe_len * 8 + bit_offset;
                 let need_bytes = (total_bits + 7) / 8;
                 // Avoid borrowing `self` across the decode call.
@@ -561,7 +568,6 @@ impl WmaDecoder {
                 if self.last_bitoffset > 0 {
                     gb2.skip_bits(self.last_bitoffset)?;
                 }
-                self.reset_block_lengths = true;
                 self.wma_decode_frame(&mut gb2, &mut samples, samples_offset)?;
                 samples_offset += self.frame_len;
                 nb_frames -= 1;
