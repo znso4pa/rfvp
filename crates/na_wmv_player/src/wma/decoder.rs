@@ -1151,6 +1151,14 @@ impl WmaDecoder {
             if v > max_scale {
                 max_scale = v;
             }
+            // The band table must be wide enough to fill one block exactly. If it
+            // runs out, the stream (or the table) is inconsistent — report it,
+            // because indexing past the row would panic the caller's thread.
+            if ptr_idx >= bands.len() {
+                return Err(DecoderError::InvalidData(
+                    "exponent bands exhausted".into(),
+                ));
+            }
             let n = bands[ptr_idx] as usize;
             ptr_idx += 1;
             for _ in 0..n {
@@ -1544,7 +1552,7 @@ impl WmaDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::exponent_index_ok;
+    use super::{exponent_index_ok, tables};
 
     /// Upstream rejects the exponent with an *unsigned* compare, so the whole
     /// negative range must be rejected — including `[-60, -1]`, which the old
@@ -1573,5 +1581,44 @@ mod tests {
 
         assert!(!exponent_index_ok(96, len));
         assert!(!exponent_index_ok(1000, len));
+    }
+
+    /// Every row of every exponent-band table must describe one block exactly.
+    ///
+    /// Row `a` is picked by `a = frame_len_bits - BLOCK_MIN_BITS - k`, which works out
+    /// to blocks of `128 << a` — 128, 256, 512 — and `decode_exp_vlc` relies on the
+    /// widths summing to that length to know when the block is full. A row that sums
+    /// short makes it spin on the zero padding and then walk off the end of the array,
+    /// which is a panic rather than an error.
+    ///
+    /// This is the check the flattened-and-rechunked tables would have failed: row 2
+    /// was all zeros, so the very first 512-sample block took the decoder down.
+    #[test]
+    fn exponent_band_tables_describe_whole_blocks() {
+        let tables: [(&str, [[u8; 25]; 3]); 3] = [
+            ("22050", tables::EXPONENT_BAND_22050),
+            ("32000", tables::EXPONENT_BAND_32000),
+            ("44100", tables::EXPONENT_BAND_44100),
+        ];
+
+        for (rate, rows) in tables {
+            for (a, row) in rows.iter().enumerate() {
+                let block_len = 128usize << a;
+                let n = row[0] as usize;
+                assert!(
+                    n < 25,
+                    "{rate} row {a}: count {n} does not leave room for the widths"
+                );
+                let sum: usize = row[1..=n].iter().map(|&w| w as usize).sum();
+                assert_eq!(
+                    sum, block_len,
+                    "{rate} row {a}: widths sum to {sum}, block is {block_len}"
+                );
+                assert!(
+                    row[n + 1..].iter().all(|&w| w == 0),
+                    "{rate} row {a}: the padding after {n} widths must be zero"
+                );
+            }
+        }
     }
 }
