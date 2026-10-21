@@ -38,9 +38,10 @@ impl<'a> GetBitContext<'a> {
 
     #[inline]
     pub fn skip_bits(&mut self, n: usize) -> Result<()> {
-        if self.bit_pos + n > self.size_in_bits {
-            return Err(DecoderError::InvalidData("bitstream overflow".into()));
-        }
+        // Past the end is not an error: upstream's buffers are zero-padded
+        // (`AV_INPUT_BUFFER_PADDING_SIZE`), so the reader is allowed to run a little
+        // beyond the last real byte. `bits_left()` goes negative, which is exactly
+        // what the callers that check it expect.
         self.bit_pos += n;
         Ok(())
     }
@@ -50,7 +51,13 @@ impl<'a> GetBitContext<'a> {
         self.get_bits(1)
     }
 
-    /// Read up to 32 bits.
+    /// Read up to 32 bits, zero-extending past the end of the buffer.
+    ///
+    /// Upstream reads from a buffer with `AV_INPUT_BUFFER_PADDING_SIZE` zero bytes
+    /// appended, so a read that starts within the last few bits of the payload
+    /// silently yields zeros instead of failing. A frame that ends two bits short of
+    /// its declared length is normal in a superframe whose carry was rounded up to a
+    /// byte boundary — erroring on it turns a decodable packet into a lost one.
     #[inline]
     pub fn get_bits(&mut self, n: usize) -> Result<u32> {
         if n == 0 {
@@ -59,13 +66,16 @@ impl<'a> GetBitContext<'a> {
         if n > 32 {
             return Err(DecoderError::InvalidData("get_bits > 32".into()));
         }
-        if self.bit_pos + n > self.size_in_bits {
-            return Err(DecoderError::InvalidData("bitstream overflow".into()));
-        }
 
         let mut out: u32 = 0;
         let mut remaining = n;
         while remaining > 0 {
+            if self.bit_pos >= self.size_in_bits {
+                out <<= remaining;
+                self.bit_pos += remaining;
+                break;
+            }
+
             let byte_idx = self.bit_pos >> 3;
             let bit_in_byte = self.bit_pos & 7; // 0..7, MSB-first
             let avail = 8 - bit_in_byte;
