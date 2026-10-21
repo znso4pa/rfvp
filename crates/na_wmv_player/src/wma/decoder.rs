@@ -286,13 +286,20 @@ fn wma_window_apply(
         let next_len = 1usize << next_block_len_bits;
         let n = (block_len - next_len) / 2;
         let bsize = (frame_len_bits - next_block_len_bits) as usize;
-        out2[n + next_len..n + next_len + n]
-            .copy_from_slice(&in_buf[n + next_len..n + next_len + n]);
+        // Long-to-short transition: the leading `n` samples come straight from the
+        // new block, and the trailing `n` are zeroed rather than carried over. This
+        // mirrors the left-hand `memcpy(out + n + block_len, ...)` above, but on the
+        // opposite end — the previous port copied the trailing `n` from `in`, which
+        // both kept data that must be dropped and dropped the head that must be kept.
+        out2[..n].copy_from_slice(&in_buf[..n]);
         vector_fmul_reverse(
             &mut out2[n..n + next_len],
             &in_buf[n..n + next_len],
             &windows[bsize],
         );
+        for v in &mut out2[n + next_len..n + next_len + n] {
+            *v = 0.0;
+        }
     }
 }
 
@@ -1552,7 +1559,7 @@ impl WmaDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{exponent_index_ok, tables};
+    use super::{exponent_index_ok, tables, wma_window_apply};
 
     /// Upstream rejects the exponent with an *unsigned* compare, so the whole
     /// negative range must be rejected — including `[-60, -1]`, which the old
@@ -1581,6 +1588,47 @@ mod tests {
 
         assert!(!exponent_index_ok(96, len));
         assert!(!exponent_index_ok(1000, len));
+    }
+
+    /// A long-to-short transition must drop the tail of the block, not carry it.
+    ///
+    /// Upstream's right-hand `else` does `memcpy(out, in, n)`, windows the middle
+    /// `next_len` samples and `memset`s the trailing `n`. The previous port copied
+    /// the trailing `n` from `in` instead — keeping data that has to be dropped —
+    /// and never copied the leading `n` at all.
+    #[test]
+    fn long_to_short_transition_zeroes_the_tail() {
+        let frame_len_bits = 11; // 2048
+        let block_len_bits = 11; // current block is 2048
+        let next_block_len_bits = 7; // next block is 128
+        let block_len = 1usize << block_len_bits;
+        let next_len = 1usize << next_block_len_bits;
+        let n = (block_len - next_len) / 2; // 960
+
+        // `windows[bsize]` is indexed by `frame_len_bits - <block_len_bits>`, so the
+        // vector needs an entry for every block size, sized to that block.
+        let windows: Vec<Vec<f32>> = (0..5).map(|b| vec![1.0f32; 2048 >> b]).collect();
+        let output = vec![0.5f32; block_len * 2];
+        let mut out = vec![7.0f32; block_len * 2];
+
+        wma_window_apply(
+            &mut out,
+            &output,
+            &windows,
+            frame_len_bits,
+            block_len_bits,
+            frame_len_bits, // prev: long, so the left part takes the simple branch
+            next_block_len_bits,
+            block_len,
+        );
+
+        let out2 = &out[block_len..];
+        assert_eq!(out2[..n], [0.5f32; 960][..], "head must come from the block");
+        assert_eq!(out2[n], 0.5, "the windowed middle starts at n");
+        assert!(
+            out2[n + next_len..n + next_len + n].iter().all(|&v| v == 0.0),
+            "the tail must be zeroed, not carried over"
+        );
     }
 
     /// Every row of every exponent-band table must describe one block exactly.
