@@ -39,3 +39,6 @@ platform/wasm/pkg/*
 
 .metals/
 *.efi
+
+# WorkBuddy AI workspace data (local memory/logs)
+.workbuddy-ai/
